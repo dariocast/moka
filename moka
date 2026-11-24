@@ -332,8 +332,8 @@ class MokaCLI:
         except KeyboardInterrupt:
             self.exit_reason = "interrupted"
         finally:
-            self._print_exit_summary()
             self.cleanup()
+            self._print_exit_summary()
 
     def _print_exit_summary(self):
         if self.summary_printed:
@@ -360,6 +360,7 @@ class MokaCLI:
         else:
             lines.append(f"  {GREEN}[OK] Moka session finished.{RESET}")
 
+        # Label allineate alla colonna 25
         lines.append(f"  [+] Total awake time:  {BOLD}{WHITE}{elapsed_clock}{RESET}  {DIM}({elapsed_human}){RESET}")
 
         if self.duration > 0:
@@ -373,10 +374,12 @@ class MokaCLI:
                 lines.append(f"  [*] Scheduled timer:   {WHITE}{dur_clock}{RESET}  {DIM}({dur_human} - stopped with {rem_human} left){RESET}")
 
         if self.total_paused_time > 0:
-            lines.append(f"  [!] Time spent paused: {format_human(self.total_paused_time)}")
+            pause_clock = format_time(self.total_paused_time)
+            pause_human = format_human(self.total_paused_time)
+            lines.append(f"  [!] Time spent paused: {BOLD}{WHITE}{pause_clock}{RESET}  {DIM}({pause_human}){RESET}")
 
-        lines.append(f"  [*] macOS energy saving restored to normal.")
-        lines.append(f"  {GRAY}-------------------------------------------------{RESET}\n")
+        lines.append(f"  [*] Energy management: Restored to normal")
+        lines.append(f"  {GRAY}-------------------------------------------------{RESET}")
 
         sys.stdout.write("\n".join(lines) + "\n")
         sys.stdout.flush()

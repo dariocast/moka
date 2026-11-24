@@ -41,7 +41,8 @@ All'uscita, il riquadro interattivo viene sostituito da un riepilogo tecnico ord
   [OK] Moka session finished.
   [+] Total awake time:  00:14:22  (14m 22s)
   [*] Scheduled timer:   00:45:00  (45m - stopped with 30m 38s left)
-  [*] macOS energy saving restored to normal.
+  [!] Time spent paused: 00:03:00  (3m)
+  [*] Energy management: Restored to normal
   -------------------------------------------------
 ```
 
