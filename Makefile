@@ -8,12 +8,10 @@ all:
 install: all
 	@mkdir -p $(PREFIX)
 	ln -sf $(CURDIR)/moka $(PREFIX)/moka
-	ln -sf $(CURDIR)/moka $(PREFIX)/caff
-	ln -sf $(CURDIR)/moka $(PREFIX)/caffeinate-ui
-	@echo "Installato in $(PREFIX)/moka (alias: caff)"
+	@echo "Installato in $(PREFIX)/moka"
 
 uninstall:
-	rm -f $(PREFIX)/moka $(PREFIX)/caff $(PREFIX)/caffeinate-ui
+	rm -f $(PREFIX)/moka
 	@echo "Rimosso da $(PREFIX)"
 
 test:

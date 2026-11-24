@@ -63,8 +63,7 @@ cd moka
 ```
 
 Comandi disponibili nel tuo `$PATH` (`~/.local/bin/`):
-* **`moka`** (comando principale)
-* **`caff`** (alias rapido)
+* **`moka`** (in `~/.local/bin/`)
 
 ---
 
