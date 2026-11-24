@@ -41,30 +41,33 @@ STEAM_FRAMES = [
     "   )  ) ",
 ]
 
+# Numero fisso di righe del riquadro per evitare scorrimenti e duplicazioni
+FIXED_UI_ROWS = 12
+
 def parse_duration(val: str) -> int:
     """Parsa stringhe di durata come 45m, 2h, 1h30m, 90s, 300 in secondi."""
     if not val:
         return 0
     val = val.strip().lower()
     if val.isdigit():
-        # Default numeric value is treated as minutes if <= 180, otherwise seconds
         num = int(val)
         return num * 60 if num <= 180 else num
     
     pattern = r'(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?\s*(?:(\d+(?:\.\d+)?)\s*s)?'
     match = re.fullmatch(pattern, val)
     if not match:
-        raise ValueError(f"Formato durata non valido: '{val}'. Esempi validi: 30m, 2h, 1h30m, 45s.")
+        raise ValueError(f"Formato durata non valido: '{val}'. Esempi: 30m, 2h, 1h30m, 45s.")
     
     hours = float(match.group(1)) if match.group(1) else 0
     minutes = float(match.group(2)) if match.group(2) else 0
     seconds = float(match.group(3)) if match.group(3) else 0
     total = int(hours * 3600 + minutes * 60 + seconds)
     if total <= 0:
-        raise ValueError(f"La durata deve essere maggiore di zero.")
+        raise ValueError("La durata deve essere maggiore di zero.")
     return total
 
 def format_time(seconds: float) -> str:
+    """Formato HH:MM:SS o MM:SS per orologi digitali."""
     secs = max(0, int(seconds))
     h = secs // 3600
     m = (secs % 3600) // 60
@@ -73,7 +76,19 @@ def format_time(seconds: float) -> str:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
-def render_progress_bar(current: float, total: float, width: int = 22) -> str:
+def format_human(seconds: float) -> str:
+    """Formato leggibile e non ambiguo (es. 1m 13s, 2h 15m)."""
+    secs = max(0, int(seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s" if s > 0 else f"{h}h {m:02d}m"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+def render_progress_bar(current: float, total: float, width: int = 18) -> str:
     if total <= 0:
         return ""
     pct = min(1.0, max(0.0, current / total))
@@ -102,8 +117,9 @@ class CaffeinateCLI:
         self.total_paused_time = 0
         self.orig_term_settings = None
         self.is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-        self.last_line_count = 0
+        self.first_draw = True
         self.exit_reason = "interrupted"
+        self.summary_printed = False
 
     def _cleanup_terminal(self):
         if self.is_tty and self.orig_term_settings:
@@ -151,11 +167,12 @@ class CaffeinateCLI:
                 pass
 
     def adjust_duration(self, delta_seconds: int):
+        elapsed = self.get_effective_elapsed()
         if self.duration <= 0:
-            self.duration = int(self.get_effective_elapsed()) + max(60, delta_seconds)
+            # Passa da modalità continua a timer: tempo trascorso + delta (minimo 60s)
+            self.duration = int(elapsed) + max(60, delta_seconds)
         else:
             new_dur = self.duration + delta_seconds
-            elapsed = self.get_effective_elapsed()
             if new_dur > elapsed:
                 self.duration = new_dur
 
@@ -170,60 +187,71 @@ class CaffeinateCLI:
 
     def draw_ui(self, frame_idx: int):
         elapsed = self.get_effective_elapsed()
-        steam = STEAM_FRAMES[frame_idx % len(STEAM_FRAMES)]
+        steam = STEAM_FRAMES[frame_idx % len(STEAM_FRAMES)] if not self.is_paused else "[in pausa]"
 
         flags_desc = []
         if "-d" in self.mode_args:
             flags_desc.append("Schermo")
         if "-i" in self.mode_args:
-            flags_desc.append("Idle sistema")
+            flags_desc.append("Idle")
         if "-m" in self.mode_args:
             flags_desc.append("Disco")
         if "-s" in self.mode_args:
-            flags_desc.append("Standby AC")
-        desc = " + ".join(flags_desc) if flags_desc else " ".join(self.mode_args)
+            flags_desc.append("AC")
+        desc = " + ".join(flags_desc) if flags_desc else "Standard"
 
         status_text = f"{GREEN}● ATTIVO{RESET}" if not self.is_paused else f"{YELLOW}❚❚ IN PAUSA{RESET}"
-        status_sub = f"Prevenzione: {desc}" if not self.is_paused else "Caffeinate temporaneamente sospeso"
+        status_sub = f"({desc})" if not self.is_paused else "(Sospeso)"
 
         started_str = datetime.fromtimestamp(self.start_time).strftime("%H:%M:%S")
-        elapsed_str = format_time(elapsed)
+        elapsed_clock = format_time(elapsed)
+        elapsed_human = format_human(elapsed)
 
+        # Costruzione del riquadro: esattamente 12 righe stabili
         lines = [
-            f"   {ORANGE}{BOLD}☕  CAFFEINATE MAC CLI{RESET}  {DIM}v1.1{RESET}",
+            f"   {ORANGE}{BOLD}☕  CAFFEINATE MAC CLI{RESET}  {DIM}v1.2{RESET}",
             f"   {GRAY}─────────────────────────────────────────────{RESET}",
-            f"   Stato:        {status_text}  {DIM}({status_sub}){RESET}",
+            f"   Stato:        {status_text}  {DIM}{status_sub}{RESET}",
             f"   PID Processo: {WHITE}{self.proc.pid if self.proc else '-'}{RESET}",
             f"   Avviato alle: {WHITE}{started_str}{RESET}",
-            f"   Tempo attivo: {BOLD}{CYAN}{elapsed_str}{RESET}",
+            f"   Tempo attivo: {BOLD}{CYAN}{elapsed_clock}{RESET}  {DIM}({elapsed_human}){RESET}",
         ]
-
-        if self.wait_pid:
-            lines.append(f"   In attesa di: PID {WHITE}{self.wait_pid}{RESET}")
 
         if self.duration > 0:
             remaining = max(0.0, self.duration - elapsed)
-            rem_str = format_time(remaining)
-            bar = render_progress_bar(elapsed, self.duration, width=20)
+            rem_clock = format_time(remaining)
+            rem_human = format_human(remaining)
+            bar = render_progress_bar(elapsed, self.duration, width=16)
             end_time = datetime.fromtimestamp(self.start_time + self.duration + self.total_paused_time).strftime("%H:%M:%S")
-            lines.append(f"   Rimanente:    {YELLOW}{BOLD}{rem_str}{RESET}  {DIM}(termine: ~{end_time}){RESET}")
+            lines.append(f"   Timer impost: {YELLOW}{format_time(self.duration)}{RESET}  {DIM}({format_human(self.duration)}){RESET}")
+            lines.append(f"   Rimanente:    {YELLOW}{BOLD}{rem_clock}{RESET}  {DIM}(fine: ~{end_time}){RESET}")
             lines.append(f"   Progresso:    {bar}")
+        else:
+            lines.append(f"   Timer impost: {DIM}Nessuno (indeterminato){RESET}")
+            lines.append(f"   Rimanente:    {DIM}Illimitato (premi + per 5m){RESET}")
+            lines.append(f"   Progresso:    {DIM}[modalità continua attiva]{RESET}")
 
         lines.append(f"   Vapore tazza: {ORANGE}{steam}{RESET}")
         lines.append(f"   {GRAY}─────────────────────────────────────────────{RESET}")
-        lines.append(f"   {BOLD}[q]{RESET} Esci pulito   {BOLD}[p]{RESET} Pausa   {BOLD}[+/-]{RESET} ±5min   {BOLD}[Ctrl+C]{RESET} Stop")
-
-        content = "\n".join(lines) + "\n"
+        lines.append(f"   {BOLD}[q]{RESET} Esci   {BOLD}[p]{RESET} Pausa   {BOLD}[+/-]{RESET} ±5min   {BOLD}[Ctrl+C]{RESET} Stop")
 
         if self.is_tty:
-            if self.last_line_count > 0:
-                sys.stdout.write(f"\033[{self.last_line_count}F\033[J")
-            sys.stdout.write(content)
-            self.last_line_count = len(lines)
+            if not self.first_draw:
+                # Sposta il cursore indietro di (N-1) righe all'inizio del blocco
+                sys.stdout.write(f"\033[{len(lines) - 1}A\r")
+            
+            # Riscrivi ogni riga cancellando preventivamente la riga con \033[2K
+            for i, line in enumerate(lines):
+                if i < len(lines) - 1:
+                    sys.stdout.write(f"\033[2K{line}\r\n")
+                else:
+                    sys.stdout.write(f"\033[2K{line}")
+            
+            self.first_draw = False
         else:
-            if self.last_line_count == 0:
-                sys.stdout.write(content)
-                self.last_line_count = len(lines)
+            if self.first_draw:
+                sys.stdout.write("\n".join(lines) + "\n")
+                self.first_draw = False
         sys.stdout.flush()
 
     def run(self):
@@ -231,8 +259,8 @@ class CaffeinateCLI:
 
         def handle_signal(sig, frame):
             self.exit_reason = "interrupted"
-            self.cleanup()
             self._print_exit_summary()
+            self.cleanup()
             sys.exit(0)
 
         signal.signal(signal.SIGINT, handle_signal)
@@ -263,20 +291,24 @@ class CaffeinateCLI:
         frame_idx = 0
         try:
             while True:
-                # Controlla se il processo caffeinate (o il processo watched) è terminato
-                if self.proc.poll() is not None:
-                    self.exit_reason = "process_finished"
-                    break
-
-                # Controlla completamento timer durata
+                # Controlla prima il completamento del timer
                 if self.duration > 0 and self.get_effective_elapsed() >= self.duration:
                     self.exit_reason = "timer_expired"
                     break
 
-                self.draw_ui(frame_idx)
-                frame_idx += 1
+                # Controlla se il processo caffeinate (o il processo watched con -w) è terminato
+                if self.proc.poll() is not None:
+                    if self.wait_pid:
+                        self.exit_reason = "process_finished"
+                    else:
+                        self.exit_reason = "process_stopped"
+                    break
 
-                # Gestione input non bloccante (tick 0.25s)
+                self.draw_ui(frame_idx)
+                if not self.is_paused:
+                    frame_idx += 1
+
+                # Polling tastiera (250ms)
                 try:
                     rlist, _, _ = select.select([sys.stdin], [], [], 0.25)
                     if rlist:
@@ -286,35 +318,66 @@ class CaffeinateCLI:
                             break
                         elif char in ('p', 'P', ' '):
                             self.toggle_pause()
+                            # Ridisegna immediatamente lo stato di pausa
+                            self.draw_ui(frame_idx)
                         elif char in ('+', '='):
                             self.adjust_duration(300)
+                            self.draw_ui(frame_idx)
                         elif char in ('-', '_'):
                             self.adjust_duration(-300)
+                            self.draw_ui(frame_idx)
                 except (select.error, IOError):
                     time.sleep(0.25)
 
         except KeyboardInterrupt:
             self.exit_reason = "interrupted"
         finally:
-            self.cleanup()
             self._print_exit_summary()
+            self.cleanup()
 
     def _print_exit_summary(self):
+        if self.summary_printed:
+            return
+        self.summary_printed = True
+
         elapsed = self.get_effective_elapsed()
-        elapsed_str = format_time(elapsed)
+        elapsed_clock = format_time(elapsed)
+        elapsed_human = format_human(elapsed)
 
-        sys.stdout.write("\n")
+        if self.is_tty and not self.first_draw:
+            # Cancella il riquadro interattivo e posiziona il cursore
+            sys.stdout.write(f"\033[{FIXED_UI_ROWS - 1}A\r\033[J")
+
+        lines = []
         if self.exit_reason == "timer_expired":
-            sys.stdout.write(f"   {GREEN}✔  Timer completato!{RESET}\n")
+            lines.append(f"   {GREEN}✔  Timer completato con successo!{RESET}")
             if self.notify:
-                send_macos_notification("Caffeinate Timer Scaduto", f"Tempo attivo completato: {elapsed_str}. Il Mac può ora andare in standby.")
+                send_macos_notification("Caffeinate Timer Scaduto", f"Tempo attivo completato: {elapsed_human}. Il Mac può ora andare in standby.")
         elif self.exit_reason == "process_finished":
-            sys.stdout.write(f"   {GREEN}✔  Processo monitorato terminato.{RESET}\n")
+            lines.append(f"   {GREEN}✔  Processo monitorato terminato.{RESET}")
         else:
-            sys.stdout.write(f"   {GREEN}✔  Sessione Caffeinate terminata.{RESET}\n")
+            lines.append(f"   {GREEN}✔  Sessione Caffeinate terminata.{RESET}")
 
-        sys.stdout.write(f"   ⏱️  Tempo totale in cui il Mac è rimasto sveglio: {BOLD}{WHITE}{elapsed_str}{RESET}\n")
-        sys.stdout.write(f"   💤 Il Mac può ora entrare in standby normalmente.\n\n")
+        # Tempo totale attivo
+        lines.append(f"   ⏱️  Tempo totale in cui il Mac è rimasto sveglio: {BOLD}{WHITE}{elapsed_clock}{RESET}  {DIM}({elapsed_human}){RESET}")
+
+        # Se era stato configurato un timer o aggiunto con +
+        if self.duration > 0:
+            dur_clock = format_time(self.duration)
+            dur_human = format_human(self.duration)
+            if self.exit_reason == "timer_expired":
+                lines.append(f"   🎯  Durata programmata: {WHITE}{dur_clock}{RESET}  {DIM}({dur_human} - interamente completata){RESET}")
+            else:
+                remaining = max(0.0, self.duration - elapsed)
+                rem_human = format_human(remaining)
+                lines.append(f"   🎯  Durata programmata: {WHITE}{dur_clock}{RESET}  {DIM}({dur_human} - interrotta con {rem_human} rimanenti){RESET}")
+
+        if self.total_paused_time > 0:
+            lines.append(f"   ❚❚  Tempo trascorso in pausa: {format_human(self.total_paused_time)}")
+
+        lines.append(f"   💤 Il Mac può ora entrare in standby normalmente.\n")
+
+        sys.stdout.write("\n".join(lines) + "\n")
         sys.stdout.flush()
 
 
@@ -330,12 +393,12 @@ Esempi:
   caffeinate-ui 2h            # Mantiene attivo per 2 ore
   caffeinate-ui 1h30m         # Mantiene attivo per 1 ora e 30 minuti
   caffeinate-ui -dims 30m     # Previene sonno display, idle, disco e standby
-  caffeinate-ui -w 12345      # Mantiene sveglio finché il processo PID 12345 è in esecuzione
+  caffeinate-ui -w 12345      # Mantiene sveglio finché il PID 12345 è in esecuzione
 
 Tasti interattivi durante l'esecuzione:
   [q]       Esci e ripristina la normale gestione energetica
   [p]       Pausa / Riprendi temporaneamente l'effetto caffeinate
-  [+]       Aggiungi 5 minuti alla durata
+  [+]       Aggiungi 5 minuti alla durata (passa anche da indeterminato a timer)
   [-]       Sottrai 5 minuti alla durata
   [Ctrl+C]  Interrompi in modo pulito
 """
