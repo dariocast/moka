@@ -1,100 +1,99 @@
-# ☕ Caffeinate UI (caffeinate-cli)
+# MOKA (Mac Os Keep Alive)
 
-Un tool a riga di comando elegante, reattivo e informativo per macOS intorno al comando nativo `caffeinate -d`.
+```text
+  __  __  ___  _  __   _   
+ |  \/  |/ _ \| |/ /  /_\  
+ | |\/| | (_) | ' <  / _ \ 
+ |_|  |_|\___/|_|\_\/_/ \_\  v2.0
+ [ Mac Os Keep Alive ]
+```
 
-Risolve i due problemi principali del `caffeinate` standard:
-1. **Zero feedback**: `caffeinate -d` resta muto senza mostrare se è attivo o da quanto tempo.
-2. **Chiusura scomoda**: per chiuderlo dovevi ricorrere a `Ctrl+C` forzato.
+CLI & TUI essenziale per macOS per controllare `caffeinate` con output grafico dal vivo, timer, barra di avanzamento e uscita pulita con un singolo tasto.
 
-Con **Caffeinate UI** hai una dashboard live nel terminale con cronometro, countdown con barra di avanzamento, animazione vapore tazza e uscita pulita con un semplice tasto `q` o `ESC`.
+**Zero emoji**, estetica terminale pulita (stile UNIX / htop) e dipendenze esterne nulle (solo Python 3 integrato di macOS).
 
 ---
 
-## 📸 Anteprima CLI
+## Anteprima TUI
 
 ```text
-   ☕  CAFFEINATE MAC CLI  v1.1
-   ─────────────────────────────────────────────
-   Stato:        ● ATTIVO  (Prevenzione: Schermo)
-   PID Processo: 12450
-   Avviato alle: 13:50:45
-   Tempo attivo: 00:14:22
-   Rimanente:    30m 38s  (termine: ~14:35:45)
-   Progresso:    [███████░░░░░░░░░░░░░] 31%
-   Vapore tazza:   (  (  
-   ─────────────────────────────────────────────
-   [q] Esci pulito   [p] Pausa   [+/-] ±5min   [Ctrl+C] Stop
+  __  __  ___  _  __   _   
+ |  \/  |/ _ \| |/ /  /_\  
+ | |\/| | (_) | ' <  / _ \ 
+ |_|  |_|\___/|_|\_\/_/ \_\  v2.0
+ [ Mac Os Keep Alive ]
+  -------------------------------------------------
+  Status:       [ACTIVE]  (Display)
+  PID:          12450
+  Started:      16:30:00
+  Active Time:  00:14:22  (14m 22s)
+  Timer:        00:45:00  (45m)
+  Remaining:    00:30:38  (eta: ~17:15:00)
+  Progress:     [=====>..........] 31%
+  -------------------------------------------------
+  [q] Quit   [p] Pause   [+/-] +-5min   [Ctrl+C] Stop
+```
+
+All'uscita, il riquadro interattivo viene sostituito da un riepilogo tecnico ordinato:
+
+```text
+  -------------------------------------------------
+  [OK] Moka session finished.
+  [+] Total awake time:  00:14:22  (14m 22s)
+  [*] Scheduled timer:   00:45:00  (45m - stopped with 30m 38s left)
+  [*] macOS energy saving restored to normal.
+  -------------------------------------------------
 ```
 
 ---
 
-## ⚡ Installazione
-
-Poiché usa esclusivamente Python 3 nativo di macOS, **non richiede librerie o pacchetti di terze parti (`pip`)**.
+## Installazione Rapida
 
 ### Metodo 1: One-liner via curl (Consigliato)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dariocast/caffeinate-ui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dariocast/moka/main/install.sh | bash
 ```
 
 ### Metodo 2: Da repository locale
 ```bash
-git clone https://github.com/dariocast/caffeinate-ui.git
-cd caffeinate-ui
+git clone https://github.com/dariocast/moka.git
+cd moka
 ./install.sh
 ```
 
-I comandi saranno disponibili immediatamente nel tuo terminale (`~/.local/bin/`):
-- `caffeinate-ui`
-- `caff` *(alias compatto)*
+Comandi disponibili nel tuo `$PATH` (`~/.local/bin/`):
+* **`moka`** (comando principale)
+* **`caff`** (alias rapido)
 
 ---
 
-## 🚀 Utilizzo
+## Utilizzo
 
-### 1. Avvio indefinito (previene sonno display)
 ```bash
-caffeinate-ui
-# oppure con l'alias rapido:
-caff
-```
+# Avvio a tempo indeterminato (previene sonno display)
+moka
 
-### 2. Con durata prestabilita (countdown + notifica nativa al termine)
-```bash
-caff 30m       # 30 minuti
-caff 2h        # 2 ore
-caff 1h30m     # 1 ora e mezza
-caff 45s       # 45 secondi
-```
+# Con timer preimpostato (countdown e notifica di sistema al termine)
+moka 30m
+moka 2h
+moka 1h30m
 
-### 3. Altre modalità energetiche macOS
-```bash
-caff -dims 1h  # Blocca display, idle sistema, disco e standby AC per 1 ora
-caff -i        # Previene solo idle sleep
-caff -s 2h     # Previene sonno di sistema con alimentatore AC
-```
+# Prevenzione completa (display, idle, disco e standby AC)
+moka -dims 45m
 
-### 4. Monitora un processo esistente (es. build, script lungo)
-```bash
-caff -w 45123  # Rimane sveglio finché il PID 45123 non termina
+# Mantieni sveglio fino al termine di un processo (es. build, script lungo)
+moka -w 45123
 ```
 
 ---
 
-## ⌨️ Controlli Interattivi da Tastiera
+## Controlli da Tastiera
 
-Durante l'esecuzione non è necessario usare `Ctrl+C`:
+Nessun bisogno di forzare `Ctrl+C`:
 | Tasto | Azione |
 | :--- | :--- |
-| `q` o `ESC` | **Esci pulito**: termina `caffeinate`, ripristina la gestione energetica e stampa il riepilogo |
-| `p` o `Spazio` | **Pausa / Riprendi**: sospende temporaneamente l'effetto senza chiudere il terminale |
-| `+` / `=` | Aggiunge **+5 minuti** al timer |
-| `-` | Sottrai **-5 minuti** al timer |
-| `Ctrl+C` | Interruzione pulita (gestita con signal trap, nessun dump di errore) |
-
----
-
-## 🔔 Notifiche Native macOS
-
-Se imposti una durata (es. `caff 45m`), alla scadenza del timer il tool emette un avviso acustico ed una notifica di sistema nativa macOS per avvisarti che il Mac è tornato alla normale modalità energetica.
-(Disattivabile con l'opzione `--no-notify`).
+| `q` o `ESC` | **Esci**: arresta `caffeinate`, ripristina la gestione energetica e stampa il riepilogo |
+| `p` | **Pausa / Riprendi**: sospende o riattiva la protezione energetica |
+| `+` | Aggiunge **+5 minuti** (trasforma anche una sessione continua in timer) |
+| `-` | Sottrae **-5 minuti** |
+| `Ctrl+C` | Interruzione pulita con signal trap |

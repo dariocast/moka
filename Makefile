@@ -3,17 +3,18 @@ PREFIX ?= $(HOME)/.local/bin
 .PHONY: all install uninstall test
 
 all:
-	@chmod +x caffeinate-ui
+	@chmod +x moka
 
 install: all
 	@mkdir -p $(PREFIX)
-	ln -sf $(CURDIR)/caffeinate-ui $(PREFIX)/caffeinate-ui
-	ln -sf $(CURDIR)/caffeinate-ui $(PREFIX)/caff
-	@echo "Installato in $(PREFIX)/caffeinate-ui e $(PREFIX)/caff"
+	ln -sf $(CURDIR)/moka $(PREFIX)/moka
+	ln -sf $(CURDIR)/moka $(PREFIX)/caff
+	ln -sf $(CURDIR)/moka $(PREFIX)/caffeinate-ui
+	@echo "Installato in $(PREFIX)/moka (alias: caff)"
 
 uninstall:
-	rm -f $(PREFIX)/caffeinate-ui $(PREFIX)/caff
+	rm -f $(PREFIX)/moka $(PREFIX)/caff $(PREFIX)/caffeinate-ui
 	@echo "Rimosso da $(PREFIX)"
 
 test:
-	./caffeinate-ui 1s
+	./moka 1s

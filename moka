@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""
+moka: Mac Os Keep Alive
+CLI / TUI per macOS caffeinate con feedback visivo in tempo reale,
+cronometro, timer con barra di avanzamento e controlli rapidi da tastiera.
+Nessuna emoji, estetica UNIX pulita con intestazione ASCII art.
+"""
+
+import sys
+import os
+import time
+import subprocess
+import signal
+import atexit
+import select
+import termios
+import tty
+import argparse
+import re
+from datetime import datetime
+
+# ANSI Colors & Styles
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+HIDE_CURSOR = "\033[?25l"
+SHOW_CURSOR = "\033[?25h"
+
+GREEN = "\033[38;5;48m"
+CYAN = "\033[38;5;51m"
+YELLOW = "\033[38;5;220m"
+ORANGE = "\033[38;5;208m"
+RED = "\033[38;5;196m"
+GRAY = "\033[38;5;244m"
+WHITE = "\033[38;5;255m"
+
+# Header ASCII Art
+BANNER_LINES = [
+    r"  __  __  ___  _  __   _   ",
+    r" |  \/  |/ _ \| |/ /  /_\  ",
+    r" | |\/| | (_) | ' <  / _ \ ",
+    r" |_|  |_|\___/|_|\_\/_/ \_\  v2.0",
+    r" [ Mac Os Keep Alive ]",
+]
+
+# Numero righe fisso del blocco TUI per garantire ridisegno atomico senza scorrimento
+FIXED_UI_ROWS = 15
+
+def parse_duration(val: str) -> int:
+    """Parsa stringhe di durata come 45m, 2h, 1h30m, 90s, 300 in secondi."""
+    if not val:
+        return 0
+    val = val.strip().lower()
+    if val.isdigit():
+        num = int(val)
+        return num * 60 if num <= 180 else num
+    
+    pattern = r'(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?\s*(?:(\d+(?:\.\d+)?)\s*s)?'
+    match = re.fullmatch(pattern, val)
+    if not match:
+        raise ValueError(f"Formato durata non valido: '{val}'. Esempi: 30m, 2h, 1h30m, 45s.")
+    
+    hours = float(match.group(1)) if match.group(1) else 0
+    minutes = float(match.group(2)) if match.group(2) else 0
+    seconds = float(match.group(3)) if match.group(3) else 0
+    total = int(hours * 3600 + minutes * 60 + seconds)
+    if total <= 0:
+        raise ValueError("La durata deve essere maggiore di zero.")
+    return total
+
+def format_time(seconds: float) -> str:
+    """Formato digitale HH:MM:SS o MM:SS."""
+    secs = max(0, int(seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+def format_human(seconds: float) -> str:
+    """Formato leggibile senza ambiguita (es. 1m 13s, 2h 15m)."""
+    secs = max(0, int(seconds))
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s" if s > 0 else f"{h}h {m:02d}m"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+def render_progress_bar(current: float, total: float, width: int = 18) -> str:
+    if total <= 0:
+        return ""
+    pct = min(1.0, max(0.0, current / total))
+    filled = int(width * pct)
+    arrow = ">" if filled < width and filled > 0 else "=" if filled == width else ""
+    fill_chars = "=" * max(0, filled - len(arrow)) + arrow
+    bar = f"{GREEN}{fill_chars}{GRAY}{'.' * (width - len(fill_chars))}{RESET}"
+    return f"[{bar}] {int(pct * 100)}%"
+
+def send_macos_notification(title: str, message: str):
+    """Invia notifica nativa macOS (senza emoji)."""
+    try:
+        script = f'display notification "{message}" with title "{title}" sound name "Glass"'
+        subprocess.run(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+class MokaCLI:
+    def __init__(self, mode_args=None, duration_seconds=0, notify=True, wait_pid=None):
+        self.mode_args = mode_args or ["-d"]
+        self.duration = duration_seconds
+        self.notify = notify
+        self.wait_pid = wait_pid
+        self.proc = None
+        self.is_paused = False
+        self.start_time = None
+        self.pause_start = None
+        self.total_paused_time = 0
+        self.orig_term_settings = None
+        self.is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+        self.first_draw = True
+        self.exit_reason = "interrupted"
+        self.summary_printed = False
+
+    def _cleanup_terminal(self):
+        if self.is_tty and self.orig_term_settings:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.orig_term_settings)
+            except Exception:
+                pass
+        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.flush()
+
+    def _terminate_process(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+
+    def cleanup(self):
+        self._terminate_process()
+        self._cleanup_terminal()
+
+    def toggle_pause(self):
+        if not self.proc:
+            return
+        if not self.is_paused:
+            try:
+                os.kill(self.proc.pid, signal.SIGSTOP)
+                self.is_paused = True
+                self.pause_start = time.time()
+            except Exception:
+                pass
+        else:
+            try:
+                os.kill(self.proc.pid, signal.SIGCONT)
+                self.is_paused = False
+                if self.pause_start:
+                    self.total_paused_time += time.time() - self.pause_start
+                    self.pause_start = None
+            except Exception:
+                pass
+
+    def adjust_duration(self, delta_seconds: int):
+        elapsed = self.get_effective_elapsed()
+        if self.duration <= 0:
+            self.duration = int(elapsed) + max(60, delta_seconds)
+        else:
+            new_dur = self.duration + delta_seconds
+            if new_dur > elapsed:
+                self.duration = new_dur
+
+    def get_effective_elapsed(self) -> float:
+        if not self.start_time:
+            return 0
+        now = time.time()
+        paused = self.total_paused_time
+        if self.is_paused and self.pause_start:
+            paused += (now - self.pause_start)
+        return max(0.0, now - self.start_time - paused)
+
+    def draw_ui(self, frame_idx: int):
+        elapsed = self.get_effective_elapsed()
+
+        flags_desc = []
+        if "-d" in self.mode_args:
+            flags_desc.append("Display")
+        if "-i" in self.mode_args:
+            flags_desc.append("Idle")
+        if "-m" in self.mode_args:
+            flags_desc.append("Disk")
+        if "-s" in self.mode_args:
+            flags_desc.append("AC-System")
+        desc = " + ".join(flags_desc) if flags_desc else "Display"
+
+        status_text = f"{GREEN}[ACTIVE]{RESET}" if not self.is_paused else f"{YELLOW}[PAUSED]{RESET}"
+        status_sub = f"({desc})" if not self.is_paused else "(Suspended)"
+
+        started_str = datetime.fromtimestamp(self.start_time).strftime("%H:%M:%S")
+        elapsed_clock = format_time(elapsed)
+        elapsed_human = format_human(elapsed)
+
+        # Costruzione del riquadro: 15 righe esatte
+        lines = []
+        lines.append(f"{CYAN}{BOLD}{BANNER_LINES[0]}{RESET}")
+        lines.append(f"{CYAN}{BOLD}{BANNER_LINES[1]}{RESET}")
+        lines.append(f"{CYAN}{BOLD}{BANNER_LINES[2]}{RESET}")
+        lines.append(f"{CYAN}{BOLD}{BANNER_LINES[3]}{RESET}")
+        lines.append(f"  {DIM}{BANNER_LINES[4]}{RESET}")
+        lines.append(f"  {GRAY}-------------------------------------------------{RESET}")
+        lines.append(f"  Status:       {status_text}  {DIM}{status_sub}{RESET}")
+        lines.append(f"  PID:          {WHITE}{self.proc.pid if self.proc else '-'}{RESET}")
+        lines.append(f"  Started:      {WHITE}{started_str}{RESET}")
+        lines.append(f"  Active Time:  {BOLD}{CYAN}{elapsed_clock}{RESET}  {DIM}({elapsed_human}){RESET}")
+
+        if self.duration > 0:
+            remaining = max(0.0, self.duration - elapsed)
+            rem_clock = format_time(remaining)
+            rem_human = format_human(remaining)
+            bar = render_progress_bar(elapsed, self.duration, width=16)
+            end_time = datetime.fromtimestamp(self.start_time + self.duration + self.total_paused_time).strftime("%H:%M:%S")
+            lines.append(f"  Timer:        {YELLOW}{format_time(self.duration)}{RESET}  {DIM}({format_human(self.duration)}){RESET}")
+            lines.append(f"  Remaining:    {YELLOW}{BOLD}{rem_clock}{RESET}  {DIM}(eta: ~{end_time}){RESET}")
+            lines.append(f"  Progress:     {bar}")
+        else:
+            lines.append(f"  Timer:        {DIM}None (indefinite mode){RESET}")
+            lines.append(f"  Remaining:    {DIM}Unlimited (press + for 5m){RESET}")
+            lines.append(f"  Progress:     {DIM}[continuous keep-alive]{RESET}")
+
+        lines.append(f"  {GRAY}-------------------------------------------------{RESET}")
+        lines.append(f"  {BOLD}[q]{RESET} Quit   {BOLD}[p]{RESET} Pause   {BOLD}[+/-]{RESET} +-5min   {BOLD}[Ctrl+C]{RESET} Stop")
+
+        if self.is_tty:
+            if not self.first_draw:
+                sys.stdout.write(f"\033[{len(lines) - 1}A\r")
+            
+            for i, line in enumerate(lines):
+                if i < len(lines) - 1:
+                    sys.stdout.write(f"\033[2K{line}\r\n")
+                else:
+                    sys.stdout.write(f"\033[2K{line}")
+            
+            self.first_draw = False
+        else:
+            if self.first_draw:
+                sys.stdout.write("\n".join(lines) + "\n")
+                self.first_draw = False
+        sys.stdout.flush()
+
+    def run(self):
+        atexit.register(self.cleanup)
+
+        def handle_signal(sig, frame):
+            self.exit_reason = "interrupted"
+            self._print_exit_summary()
+            self.cleanup()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
+
+        cmd = ["caffeinate"] + self.mode_args
+        if self.wait_pid:
+            cmd += ["-w", str(self.wait_pid)]
+
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            sys.stderr.write(f"{RED}Error: 'caffeinate' command not found on this system.{RESET}\n")
+            sys.exit(1)
+
+        self.start_time = time.time()
+
+        if self.is_tty:
+            try:
+                self.orig_term_settings = termios.tcgetattr(sys.stdin)
+                tty.setcbreak(sys.stdin.fileno())
+                sys.stdout.write(HIDE_CURSOR)
+                sys.stdout.flush()
+            except Exception:
+                self.is_tty = False
+
+        frame_idx = 0
+        try:
+            while True:
+                # 1. Controlla completamento timer
+                if self.duration > 0 and self.get_effective_elapsed() >= self.duration:
+                    self.exit_reason = "timer_expired"
+                    break
+
+                # 2. Controlla terminazione processo
+                if self.proc.poll() is not None:
+                    if self.wait_pid:
+                        self.exit_reason = "process_finished"
+                    else:
+                        self.exit_reason = "process_stopped"
+                    break
+
+                self.draw_ui(frame_idx)
+                if not self.is_paused:
+                    frame_idx += 1
+
+                # 3. Input non bloccante
+                try:
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.25)
+                    if rlist:
+                        char = sys.stdin.read(1)
+                        if not char or char in ('q', 'Q', '\x1b', '\x04'):
+                            self.exit_reason = "user_quit"
+                            break
+                        elif char in ('p', 'P', ' '):
+                            self.toggle_pause()
+                            self.draw_ui(frame_idx)
+                        elif char in ('+', '='):
+                            self.adjust_duration(300)
+                            self.draw_ui(frame_idx)
+                        elif char in ('-', '_'):
+                            self.adjust_duration(-300)
+                            self.draw_ui(frame_idx)
+                except (select.error, IOError):
+                    time.sleep(0.25)
+
+        except KeyboardInterrupt:
+            self.exit_reason = "interrupted"
+        finally:
+            self._print_exit_summary()
+            self.cleanup()
+
+    def _print_exit_summary(self):
+        if self.summary_printed:
+            return
+        self.summary_printed = True
+
+        elapsed = self.get_effective_elapsed()
+        elapsed_clock = format_time(elapsed)
+        elapsed_human = format_human(elapsed)
+
+        if self.is_tty and not self.first_draw:
+            sys.stdout.write(f"\033[{FIXED_UI_ROWS - 1}A\r\033[J")
+
+        lines = [
+            f"  {GRAY}-------------------------------------------------{RESET}",
+        ]
+
+        if self.exit_reason == "timer_expired":
+            lines.append(f"  {GREEN}[OK] Timer completed successfully.{RESET}")
+            if self.notify:
+                send_macos_notification("Moka Keep-Alive", f"Timer completed: {elapsed_human}. Normal sleep restored.")
+        elif self.exit_reason == "process_finished":
+            lines.append(f"  {GREEN}[OK] Monitored process finished.{RESET}")
+        else:
+            lines.append(f"  {GREEN}[OK] Moka session finished.{RESET}")
+
+        lines.append(f"  [+] Total awake time:  {BOLD}{WHITE}{elapsed_clock}{RESET}  {DIM}({elapsed_human}){RESET}")
+
+        if self.duration > 0:
+            dur_clock = format_time(self.duration)
+            dur_human = format_human(self.duration)
+            if self.exit_reason == "timer_expired":
+                lines.append(f"  [*] Scheduled timer:   {WHITE}{dur_clock}{RESET}  {DIM}({dur_human} - fully elapsed){RESET}")
+            else:
+                remaining = max(0.0, self.duration - elapsed)
+                rem_human = format_human(remaining)
+                lines.append(f"  [*] Scheduled timer:   {WHITE}{dur_clock}{RESET}  {DIM}({dur_human} - stopped with {rem_human} left){RESET}")
+
+        if self.total_paused_time > 0:
+            lines.append(f"  [!] Time spent paused: {format_human(self.total_paused_time)}")
+
+        lines.append(f"  [*] macOS energy saving restored to normal.")
+        lines.append(f"  {GRAY}-------------------------------------------------{RESET}\n")
+
+        sys.stdout.write("\n".join(lines) + "\n")
+        sys.stdout.flush()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="moka",
+        description="Moka (Mac Os Keep Alive) - CLI tool for macOS caffeinate with live TUI and clean quit.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  moka                  # Prevent display sleep indefinitely (default)
+  moka 45m              # Keep awake for 45 minutes with progress & notification
+  moka 2h               # Keep awake for 2 hours
+  moka 1h30m            # Keep awake for 1 hour 30 minutes
+  moka -dims 30m        # Prevent display, idle, disk and AC sleep
+  moka -w 12345         # Keep awake while process PID 12345 is running
+
+Interactive controls:
+  [q]       Clean quit and restore macOS power management
+  [p]       Pause / Resume keep-alive state
+  [+]       Add 5 minutes to duration (or start timer from indefinite)
+  [-]       Subtract 5 minutes from duration
+  [Ctrl+C]  Clean interruption
+"""
+    )
+
+    parser.add_argument("duration", nargs="?", default=None,
+                        help="Optional duration (e.g. 15m, 1h, 1h30m, 45s, or minutes).")
+    parser.add_argument("-d", "--display", action="store_true", default=True,
+                        help="Prevent display sleep (active by default).")
+    parser.add_argument("-i", "--idle", action="store_true",
+                        help="Prevent idle system sleep.")
+    parser.add_argument("-m", "--disk", action="store_true",
+                        help="Prevent idle disk sleep.")
+    parser.add_argument("-s", "--system", action="store_true",
+                        help="Prevent system sleep (AC power only).")
+    parser.add_argument("-dims", "--all", action="store_true",
+                        help="Enable all assertions (-d, -i, -m, -s).")
+    parser.add_argument("-w", "--wait-pid", type=int, default=None,
+                        help="Wait for process with specified PID to terminate.")
+    parser.add_argument("--no-notify", action="store_true",
+                        help="Disable macOS desktop notification when timer expires.")
+
+    args = parser.parse_args()
+
+    duration_secs = 0
+    if args.duration:
+        try:
+            duration_secs = parse_duration(args.duration)
+        except ValueError as e:
+            sys.stderr.write(f"{RED}Error: {e}{RESET}\n")
+            sys.exit(1)
+
+    caff_args = []
+    if args.all:
+        caff_args = ["-d", "-i", "-m", "-s"]
+    else:
+        if args.idle:
+            caff_args.append("-i")
+        if args.disk:
+            caff_args.append("-m")
+        if args.system:
+            caff_args.append("-s")
+        if args.display or not caff_args:
+            if "-d" not in caff_args:
+                caff_args.append("-d")
+
+    app = MokaCLI(
+        mode_args=caff_args,
+        duration_seconds=duration_secs,
+        notify=not args.no_notify,
+        wait_pid=args.wait_pid
+    )
+    app.run()
+
+if __name__ == "__main__":
+    main()
